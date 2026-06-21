@@ -65,6 +65,24 @@ stop_services() {
     log_info "Services stopped"
 }
 
+# Start production stack
+start_prod() {
+    if [ ! -f .env ]; then
+        log_error ".env not found. Copy .env.production.example to .env and configure it."
+        exit 1
+    fi
+    log_info "Starting production stack..."
+    docker compose -f docker-compose.prod.yml --env-file .env up -d
+    log_info "Production stack started on port ${APP_PORT:-8080}"
+}
+
+# Stop production stack
+stop_prod() {
+    log_info "Stopping production stack..."
+    docker compose -f docker-compose.prod.yml down
+    log_info "Production stack stopped"
+}
+
 # Run tests
 run_tests() {
     log_info "Running tests..."
@@ -106,18 +124,31 @@ Commands:
     check       Check prerequisites (docker, docker-compose, maven)
     build       Build application with Maven
     test        Run tests
-    start       Start services with Docker Compose
+    start       Start services with Docker Compose (CI stack)
     stop        Stop services
     docker      Build Docker image
     push        Push Docker image to registry (requires registry URL)
+    prod-start  Start production stack (docker-compose.prod.yml)
+    prod-stop   Stop production stack
     full        Full cycle: build -> docker -> start
     help        Show this help message
+
+Production deploy on server:
+    1. cp .env.production.example .env && edit credentials
+    2. export APP_IMAGE=ghcr.io/OWNER/REPO:TAG
+    3. ./deploy.sh prod-start
+
+GitHub Actions deploy:
+    - Set variable DEPLOY_ENABLED=true
+    - Configure secrets DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY
+    - Push tag v1.0.0 or run workflow manually
 
 Examples:
     ./deploy.sh check
     ./deploy.sh build
     ./deploy.sh docker
     ./deploy.sh push ghcr.io/myorg v1.0.0
+    ./deploy.sh prod-start
     ./deploy.sh full
 
 EOF
@@ -144,6 +175,13 @@ main() {
             ;;
         stop)
             stop_services
+            ;;
+        prod-start)
+            check_prerequisites
+            start_prod
+            ;;
+        prod-stop)
+            stop_prod
             ;;
         docker)
             build_docker

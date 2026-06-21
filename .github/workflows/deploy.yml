@@ -4,47 +4,155 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag da imagem (ex: v1.0.0 ou latest)'
+        required: true
+        default: 'latest'
+
+env:
+  REGISTRY: ghcr.io
 
 jobs:
-  deploy:
+  build-and-push:
     runs-on: ubuntu-latest
 
     permissions:
-      contents: read
+      contents: write
       packages: write
+
+    outputs:
+      image_tag: ${{ steps.resolve-tag.outputs.image_tag }}
+      image_name: ${{ steps.resolve-tag.outputs.image_name }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          java-version: '21'
-          distribution: 'temurin'
-          cache: maven
-
-      - name: Build Docker image
+      - name: Resolve image tag
+        id: resolve-tag
         run: |
-          mvn clean package \
-            -DskipTests \
-            -Dquarkus.container-image.build=true \
-            -Dquarkus.container-image.push=true \
-            -Dquarkus.container-image.image-id=feira-ciencias-api:${{ github.ref_name }} \
-            -Dquarkus.container-image.registry=ghcr.io \
-            -Dquarkus.container-image.group=${{ github.repository_owner }}
-        env:
-          REGISTRY_USERNAME: ${{ github.actor }}
-          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.image_tag }}"
+          else
+            TAG="${{ github.ref_name }}"
+          fi
+          IMAGE="${{ env.REGISTRY }}/${{ github.repository }}:${TAG}"
+          echo "image_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "image_name=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Deploying image: ${IMAGE}"
 
-      - name: Create Release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.resolve-tag.outputs.image_name }}
+            ${{ env.REGISTRY }}/${{ github.repository }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ github.ref_name }}
-          draft: false
-          prerelease: false
+          name: Release ${{ github.ref_name }}
+          generate_release_notes: true
 
-      - name: Deploy notification
-        run: echo "Deployment triggered for ${{ github.ref_name }}"
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: vars.DEPLOY_ENABLED == 'true'
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare deploy settings
+        id: deploy
+        run: |
+          PORT="${{ secrets.DEPLOY_PORT }}"
+          PATH_DIR="${{ secrets.DEPLOY_PATH }}"
+          if [ -z "$PORT" ]; then PORT=22; fi
+          if [ -z "$PATH_DIR" ]; then PATH_DIR="/opt/feira-ciencias-api"; fi
+          echo "port=$PORT" >> "$GITHUB_OUTPUT"
+          echo "path=$PATH_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Copy deployment files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ steps.deploy.outputs.port }}
+          source: "docker-compose.prod.yml,.env.production.example,scripts/server-deploy.sh"
+          target: ${{ steps.deploy.outputs.path }}
+          strip_components: 0
+
+      - name: Deploy application on server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ steps.deploy.outputs.port }}
+          script: |
+            set -e
+            DEPLOY_PATH="${{ steps.deploy.outputs.path }}"
+            mkdir -p "$DEPLOY_PATH/scripts"
+            if [ -f "$DEPLOY_PATH/server-deploy.sh" ]; then
+              mv "$DEPLOY_PATH/server-deploy.sh" "$DEPLOY_PATH/scripts/server-deploy.sh"
+            fi
+            chmod +x "$DEPLOY_PATH/scripts/server-deploy.sh"
+            if [ ! -f "$DEPLOY_PATH/.env" ] && [ -f "$DEPLOY_PATH/.env.production.example" ]; then
+              cp "$DEPLOY_PATH/.env.production.example" "$DEPLOY_PATH/.env"
+              echo "Created $DEPLOY_PATH/.env from example. Ajuste credenciais e APP_IMAGE antes de expor na rede."
+            fi
+            export DEPLOY_DIR="$DEPLOY_PATH"
+            export APP_IMAGE="${{ needs.build-and-push.outputs.image_name }}"
+            export GHCR_USER="${{ github.actor }}"
+            export GHCR_TOKEN="${{ secrets.DEPLOY_GHCR_TOKEN }}"
+            if [ -z "$GHCR_TOKEN" ]; then
+              export GHCR_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+            fi
+            bash "$DEPLOY_PATH/scripts/server-deploy.sh"
+
+      - name: Deployment summary
+        run: |
+          echo "Deployed: ${{ needs.build-and-push.outputs.image_name }}"
+          echo "Server: ${{ secrets.DEPLOY_HOST }}"
+          echo "API: http://${{ secrets.DEPLOY_HOST }}:8080"
+          echo "Health: http://${{ secrets.DEPLOY_HOST }}:8080/q/health"
+          echo "Swagger (se habilitado): http://${{ secrets.DEPLOY_HOST }}:8080/q/swagger-ui"
+
+  deploy-skipped:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: vars.DEPLOY_ENABLED != 'true'
+    steps:
+      - name: Server deploy not configured
+        run: |
+          echo "Image published: ${{ needs.build-and-push.outputs.image_name }}"
+          echo ""
+          echo "Deploy SSH skipped. Para habilitar:"
+          echo "1. Settings -> Secrets and variables -> Actions -> Variables"
+          echo "   DEPLOY_ENABLED = true"
+          echo "2. Settings -> Secrets and variables -> Actions -> Secrets"
+          echo "   DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY"
+          echo "   DEPLOY_GHCR_TOKEN (PAT read:packages, se GHCR privado)"
+          echo "   DEPLOY_PATH (opcional, padrao /opt/feira-ciencias-api)"
+          echo "   DEPLOY_PORT (opcional, padrao 22)"
+          echo "3. No servidor: Docker + Docker Compose instalados"
+          echo "4. Liberar porta APP_PORT (padrao 8080) no firewall"

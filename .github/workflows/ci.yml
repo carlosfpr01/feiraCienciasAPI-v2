@@ -1,0 +1,97 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop, 'feat/**' ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15.4-alpine
+        env:
+          POSTGRES_USER: feira_user
+          POSTGRES_PASSWORD: feira_pass
+          POSTGRES_DB: feira_ciencias
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Wait for PostgreSQL
+        run: |
+          until pg_isready -h localhost -p 5432 -U feira_user; do
+            echo "Waiting for PostgreSQL..."
+            sleep 1
+          done
+        env:
+          PGPASSWORD: feira_pass
+
+      - name: Run tests
+        run: mvn clean test
+        env:
+          QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://localhost:5432/feira_ciencias
+          QUARKUS_DATASOURCE_USERNAME: feira_user
+          QUARKUS_DATASOURCE_PASSWORD: feira_pass
+          JWT_PRIVATE_KEY_PATH: /tmp/privateKey.pem
+          JWT_PUBLIC_KEY_PATH: /tmp/publicKey.pem
+
+      - name: Build application
+        run: mvn clean package -DskipTests
+        env:
+          QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://localhost:5432/feira_ciencias
+          QUARKUS_DATASOURCE_USERNAME: feira_user
+          QUARKUS_DATASOURCE_PASSWORD: feira_pass
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: feira-ciencias-app
+          path: bootstrap/target/quarkus-app/
+          retention-days: 30
+
+      - name: SonarCloud Scan (Optional)
+        uses: SonarSource/sonarcloud-github-action@master
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        continue-on-error: true
+
+  code-quality:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Run spotbugs analysis
+        run: mvn spotbugs:check || true
+        continue-on-error: true
+
+      - name: Validate code format
+        run: mvn formatter:validate || true
+        continue-on-error: true

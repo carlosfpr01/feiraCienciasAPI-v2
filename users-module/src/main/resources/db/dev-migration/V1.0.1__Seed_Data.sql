@@ -1,0 +1,1 @@
+-- Seed movido para Startup Data Loader no Java para garantir compatibilidade de Hash BCrypt.

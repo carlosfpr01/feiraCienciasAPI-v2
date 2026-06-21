@@ -1,0 +1,74 @@
+version: '3.8'
+
+# Este arquivo é usado para testes locais e pode ser usado por CI/CD
+# Para produção, use variáveis de ambiente ou secrets do seu orchestrator
+
+services:
+  db:
+    image: postgres:15.4-alpine
+    container_name: feira_ciencias_db_ci
+    environment:
+      POSTGRES_USER: ${DB_USER:-feira_user}
+      POSTGRES_PASSWORD: ${DB_PASS:-feira_pass}
+      POSTGRES_DB: ${DB_NAME:-feira_ciencias}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_ci_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-feira_user} -d ${DB_NAME:-feira_ciencias}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - feira_network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: feira_ciencias_api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      QUARKUS_PROFILE: prod
+      DB_URL: jdbc:postgresql://db:5432/${DB_NAME:-feira_ciencias}
+      DB_USER: ${DB_USER:-feira_user}
+      DB_PASS: ${DB_PASS:-feira_pass}
+      JWT_PRIVATE_KEY_PATH: ${JWT_PRIVATE_KEY_PATH}
+      JWT_PUBLIC_KEY_PATH: ${JWT_PUBLIC_KEY_PATH}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://localstack:4566}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-test}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-test}
+      S3_BUCKET: ${S3_BUCKET:-feira-ciencias}
+      S3_PUBLIC_URL: ${S3_PUBLIC_URL:-http://localstack:4566/feira-ciencias}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    networks:
+      - feira_network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/q/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  localstack:
+    image: localstack/localstack:3.4.0
+    container_name: localstack_s3_ci
+    ports:
+      - "${LOCALSTACK_PORT:-4566}:4566"
+    environment:
+      - SERVICES=s3
+      - ACTIVATE_PRO=false
+    networks:
+      - feira_network
+
+volumes:
+  postgres_ci_data:
+
+networks:
+  feira_network:
+    driver: bridge

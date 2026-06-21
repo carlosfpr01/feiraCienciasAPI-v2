@@ -1,0 +1,39 @@
+services:
+  db:
+    image: postgres:15.4-alpine
+    container_name: feira_ciencias_db
+    environment:
+      POSTGRES_USER: feira_user
+      POSTGRES_PASSWORD: feira_pass
+      POSTGRES_DB: feira_ciencias
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U feira_user -d feira_ciencias"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  localstack:
+    container_name: localstack_s3
+    image: localstack/localstack:3.4.0
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3
+      - ACTIVATE_PRO=false
+
+  adminer:
+    image: adminer
+    container_name: feira_ciencias_adminer
+    ports:
+      - "8081:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  pgadmin_data:
